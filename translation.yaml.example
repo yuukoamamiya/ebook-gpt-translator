@@ -5,12 +5,6 @@
         "retry_count": 3,
         "key": "GOOGLE-API-KEY"
     },
-    "Poe-api": {
-        "name": "Gemini-Pro",
-        "type": "api",
-        "retry_count": 1,
-        "key": "POE-API-KEY"
-    },
     "Poe-api-chatgpt": {
         "name": "ChatGPT",
         "type": "api",

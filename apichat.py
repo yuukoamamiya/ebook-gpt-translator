@@ -1,31 +1,19 @@
 from openai import OpenAI
 import openai
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import yaml
 import asyncio
 import fastapi_poe as fp
 from litellm import completion
 from anthropic import Anthropic
 
+
 SYSTEM_PROMPT = "你是一个翻译机器人，将外语翻译为中文。如果内容无需翻译，你会返回原文。你从不增加额外的分析，只返回翻译后的内容。你从来只回答中文。"
 SAFETY_SETTINGS = [
-    types.SafetySetting(
-        category='HARM_CATEGORY_SEXUALLY_EXPLICIT',
-        threshold='BLOCK_NONE'
-    ),
-    types.SafetySetting(
-        category='HARM_CATEGORY_HATE_SPEECH',
-        threshold='BLOCK_NONE'
-    ),
-    types.SafetySetting(
-        category='HARM_CATEGORY_HARASSMENT',
-        threshold='BLOCK_NONE'
-    ),
-    types.SafetySetting(
-        category='HARM_CATEGORY_DANGEROUS_CONTENT',
-        threshold='BLOCK_NONE'
-    )
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
 
@@ -50,7 +38,7 @@ class APIChatApp:
 
     def chat(self, message):
         raise NotImplementedError("Subclasses must implement this method")
-
+    
 
 class OpenAIChatApp(APIChatApp):
     def __init__(self, api_key, model_name, temperature=0.7, endpoint="https://api.openai.com/v1"):
@@ -91,7 +79,7 @@ class OpenAIChatApp(APIChatApp):
         except openai.APIError as e:
             raise APITranslationFailure(f"OpenAI API connection failed: {str(e)}")
 
-
+    
 class LiteLLMChatApp(APIChatApp):
     def __init__(self, api_key, model_name, temperature=1.0):
         super().__init__(api_key, model_name, temperature)
@@ -114,62 +102,38 @@ class LiteLLMChatApp(APIChatApp):
 class GoogleChatApp(APIChatApp):
     def __init__(self, api_key, model_name, temperature=1.0):
         super().__init__(api_key, model_name, temperature)
-        self.client = genai.Client(api_key=self.api_key)
-        
+        genai.configure(api_key=self.api_key)
+        self.model = genai.GenerativeModel(self.model_name, system_instruction=SYSTEM_PROMPT)
+        self.SAFETY_SETTINGS = SAFETY_SETTINGS
+
     def chat(self, message, image=None):
         if image:
             self.messages = []
 
+        # Update all content to parts
+        new_messages = []
+        for i, m in enumerate(self.messages):
+            if m["role"] == "assistant":
+                m["role"] = "model"
+            elif m["role"] == "system":
+                continue
+            if "content" in m:
+                new_messages.append({"role": m["role"], "parts": [m["content"]]})
+            else:
+                new_messages.append({"role": m["role"], "parts": m["parts"]})
+        self.messages = new_messages
+        self.messages.append({"role": "user", "parts": [message]})
         try:
-            contents = []
-            for msg in self.messages:
-                if msg["role"] == "system":
-                    continue
-                elif msg["role"] == "assistant":
-                    role = "model"
-                else:
-                    role = msg["role"]
-                
-                if "content" in msg:
-                    contents.append(types.Content(
-                        role=role,
-                        parts=[types.Part.from_text(msg["content"])]
-                    ))
-                else:
-                    contents.append(types.Content(
-                        role=role,
-                        parts=msg["parts"]
-                    ))
-            
-            contents.append(types.Content(
-                role="user",
-                parts=[types.Part.from_text(message)]
-            ))
-
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    safety_settings=SAFETY_SETTINGS,
-                    temperature=self.temperature,
-                    max_output_tokens=8192
-                )
+            response = self.model.generate_content(
+                self.messages,
+                safety_settings=self.SAFETY_SETTINGS,
+                generation_config={"temperature": self.temperature, "max_output_tokens": 8192}
             )
-            
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback is not None:
+            if 'block_reason' in response.prompt_feedback:
                 print(vars(response))
                 raise APITranslationFailure("Content generation blocked due to safety settings.")
-            
-            from loguru import logger
-            logger.critical(response)
-            
-            self.messages.append({
-                "role": "assistant",
-                "content": response.text
-            })
-            
-            return response.text
-
+            self.messages += [{"role": "assistant", "parts": response.parts}]
+            return response.text if hasattr(response, "text") else response.parts
         except Exception as e:
             raise APITranslationFailure(f"Google API connection failed: {str(e)}")
 
@@ -227,25 +191,19 @@ if __name__ == "__main__":
 
     image_prompt = "Recognize text from the book. Skip header and page number."
     
-    # poe_chat = GoogleChatApp(
-    #     api_key=translation_config['Gemini-Pro-api']['key'], 
-    #     model_name=translation_config['Gemini-Pro-api']['name']
+    # poe_chat = PoeAPIChatApp(
+    #     api_key=translation_config['Poe-api']['key'], 
+    #     model_name='Gemini-1.5-Pro'
     # )
-    
-    poe_chat = PoeAPIChatApp(
-        api_key=translation_config['Poe-api']['key'], 
-        model_name=translation_config['Poe-api']['name']
-    )
 
     # image_prompt += "\n\n https://i.ibb.co/hgt8pkg/example.png"
     # print(poe_chat.chat(image_prompt))
 
     # image_prompt = "https://resize.cdn.otakumode.com/ex/800.1000/shop/product/036fb4d5406746d5b3ea3a0eb9f7691c.jpg"
 
-    # poe_chat = OpenAIChatApp(
-    #     api_key=translation_config['Sakura-OpenAI-api']['key'], 
-    #     model_name=translation_config['Sakura-OpenAI-api']['name'],
-    #     endpoint=translation_config['Sakura-OpenAI-api']['endpoint']
-    # )
-    print(poe_chat.model_name)
-    print(poe_chat.chat("翻译以下外文为中文：Hello, how are you today?"))
+    poe_chat = OpenAIChatApp(
+        api_key=translation_config['Sakura-OpenAI-api']['key'], 
+        model_name=translation_config['Sakura-OpenAI-api']['name'],
+        endpoint=translation_config['Sakura-OpenAI-api']['endpoint']
+    )
+    poe_chat.chat(image_prompt)
